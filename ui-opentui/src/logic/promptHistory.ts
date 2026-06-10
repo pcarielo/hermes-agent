@@ -40,7 +40,9 @@ export interface DoublePress {
 export function createDoublePress(windowMs: number = DOUBLE_PRESS_WINDOW_MS): DoublePress {
   let armedAt: number | undefined
   return {
-    press(now: number = Date.now()): boolean {
+    // performance.now() is monotonic (Node) — an NTP/wall-clock jump between
+    // two presses can't break or spuriously satisfy the window (review finding).
+    press(now: number = performance.now()): boolean {
       if (armedAt !== undefined && now - armedAt <= windowMs) {
         armedAt = undefined
         return true

@@ -62,7 +62,9 @@ export function PromptHistory(props: {
   useKeyboard(key => {
     if (key.eventType === 'release') return
     if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
-      // Esc backs out one level: confirm → list, list → closed.
+      // Esc backs out one level: confirm → list, list → closed. Consumed —
+      // a closing Esc must never reach later global handlers (review finding).
+      key.preventDefault()
       if (confirming() !== undefined) setConfirming(undefined)
       else props.onClose()
       return
