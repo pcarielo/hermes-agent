@@ -29,6 +29,7 @@ import { readClipboardImage, writeClipboard } from '../boundary/clipboard.ts'
 import { GatewayService, type GatewayServiceShape } from '../boundary/gateway/GatewayService.ts'
 import { liveGatewayLayer } from '../boundary/gateway/liveGateway.ts'
 import { getLog } from '../boundary/log.ts'
+import { registerVendoredParsers } from '../boundary/parsers.ts'
 import { acquireRenderer } from '../boundary/renderer.ts'
 import { makeAppLayer } from '../boundary/runtime.ts'
 import { nthAssistantResponse } from '../logic/copy.ts'
@@ -48,6 +49,11 @@ import {
 import { createSessionStore, type SessionStore } from '../logic/store.ts'
 import { App } from '../view/App.tsx'
 import { TerminalChrome } from '../view/terminalChrome.tsx'
+
+// Syntax-highlighting language expansion: register the vendored tree-sitter
+// grammars (python/rust/go/bash/json/c/html/css/yaml/toml) before the first
+// <code>/<markdown> mount initializes the global tree-sitter client.
+registerVendoredParsers()
 import type { SessionPickerOps } from '../view/overlays/sessionPicker.tsx'
 import { ThemeProvider } from '../view/theme.tsx'
 import { makeFakeGatewayLayer, type FakeGatewayController } from './fakeGateway.ts'
