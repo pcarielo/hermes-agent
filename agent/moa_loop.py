@@ -21,6 +21,43 @@ def _slot_label(slot: dict[str, str]) -> str:
     return f"{slot.get('provider', '').strip()}:{slot.get('model', '').strip()}"
 
 
+def _reference_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build an advisory-safe view of the conversation for reference models.
+
+    Reference calls are advisory: they never call tools and never emit the
+    ``tool_calls`` the main model did. Replaying the full transcript verbatim
+    (a) re-bills the ~8K-token Hermes system prompt per reference per
+    iteration and (b) risks 400s from strict providers (Mistral, Fireworks)
+    that reject orphan ``tool`` messages or ``tool_calls`` the reference never
+    produced. We keep only the user/assistant *text* turns, dropping the
+    system prompt, any ``tool``-role messages, and any ``tool_calls`` payloads.
+    """
+    trimmed: list[dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role")
+        if role not in ("user", "assistant"):
+            # Drop system prompt and tool-result messages.
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str):
+            # Skip non-text (multimodal/tool-call-only) assistant turns.
+            if not content:
+                continue
+        text = content if isinstance(content, str) else ""
+        if role == "assistant" and not text.strip():
+            # Assistant turn that was purely tool calls — nothing advisory.
+            continue
+        trimmed.append({"role": role, "content": text})
+    if not trimmed:
+        # Degenerate case (e.g. first turn was stripped): fall back to a
+        # minimal user turn so the reference still has something to answer.
+        for msg in reversed(messages):
+            if msg.get("role") == "user" and isinstance(msg.get("content"), str):
+                return [{"role": "user", "content": msg["content"]}]
+    return trimmed
+
+
+
 def _extract_text(response: Any) -> str:
     try:
         transport = get_transport("chat_completions")
@@ -55,6 +92,7 @@ def aggregate_moa_context(
     agent loop; the main model can still act with partial context.
     """
     reference_outputs: list[tuple[str, str]] = []
+    ref_messages = _reference_messages(api_messages)
     for slot in reference_models:
         label = _slot_label(slot)
         try:
@@ -62,7 +100,7 @@ def aggregate_moa_context(
                 task="moa_reference",
                 provider=slot["provider"],
                 model=slot["model"],
-                messages=api_messages,
+                messages=ref_messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
@@ -132,7 +170,14 @@ class MoAChatCompletions:
         temperature = float(preset.get("reference_temperature", 0.6) or 0.6)
         aggregator_temperature = float(preset.get("aggregator_temperature", api_kwargs.get("temperature") or 0.4) or 0.4)
 
+        # When the preset is disabled, skip the reference fan-out and let the
+        # configured aggregator act alone — it is the preset's acting model, so
+        # a disabled MoA preset is simply "use the aggregator directly."
+        if not preset.get("enabled", True):
+            reference_models = []
+
         reference_outputs: list[tuple[str, str]] = []
+        ref_messages = _reference_messages(messages)
         for slot in reference_models:
             if slot.get("provider") == "moa":
                 reference_outputs.append((_slot_label(slot), "[skipped: MoA presets cannot recursively reference MoA]"))
@@ -142,7 +187,7 @@ class MoAChatCompletions:
                     task="moa_reference",
                     provider=slot["provider"],
                     model=slot["model"],
-                    messages=messages,
+                    messages=ref_messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
@@ -151,26 +196,27 @@ class MoAChatCompletions:
                 logger.warning("MoA reference model %s failed: %s", _slot_label(slot), exc)
                 reference_outputs.append((_slot_label(slot), f"[failed: {exc}]"))
 
-        joined = "\n\n".join(
-            f"Reference {idx} — {label}:\n{text}"
-            for idx, (label, text) in enumerate(reference_outputs, start=1)
-        )
-        guidance = (
-            "[Mixture of Agents reference context]\n"
-            f"Preset: {self.preset_name}\n"
-            f"Aggregator/acting model: {_slot_label(aggregator)}\n"
-            f"References: {', '.join(label for label, _ in reference_outputs)}\n\n"
-            "Use the reference responses below as private context. You are the aggregator and acting model: "
-            "answer the user directly or call tools as needed.\n\n"
-            f"{joined}"
-        )
-        agg_messages = list(messages)
-        for msg in reversed(agg_messages):
-            if msg.get("role") == "user" and isinstance(msg.get("content"), str):
-                msg["content"] = msg["content"] + "\n\n" + guidance
-                break
-        else:
-            agg_messages.append({"role": "user", "content": guidance})
+        agg_messages = [dict(m) for m in messages]
+        if reference_outputs:
+            joined = "\n\n".join(
+                f"Reference {idx} — {label}:\n{text}"
+                for idx, (label, text) in enumerate(reference_outputs, start=1)
+            )
+            guidance = (
+                "[Mixture of Agents reference context]\n"
+                f"Preset: {self.preset_name}\n"
+                f"Aggregator/acting model: {_slot_label(aggregator)}\n"
+                f"References: {', '.join(label for label, _ in reference_outputs)}\n\n"
+                "Use the reference responses below as private context. You are the aggregator and acting model: "
+                "answer the user directly or call tools as needed.\n\n"
+                f"{joined}"
+            )
+            for msg in reversed(agg_messages):
+                if msg.get("role") == "user" and isinstance(msg.get("content"), str):
+                    msg["content"] = msg["content"] + "\n\n" + guidance
+                    break
+            else:
+                agg_messages.append({"role": "user", "content": guidance})
 
         if aggregator.get("provider") == "moa":
             raise RuntimeError("MoA aggregator cannot be another MoA preset")

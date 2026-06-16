@@ -588,7 +588,7 @@ def test_aggregator_dedup_no_user_providers_unchanged():
     with _list_auth_returning(rows):
         payload = build_models_payload(ctx)
 
-    or_row = payload["providers"][0]
+    or_row = next(r for r in payload["providers"] if r["slug"] == "openrouter")
     assert len(or_row["models"]) == 2
 
 

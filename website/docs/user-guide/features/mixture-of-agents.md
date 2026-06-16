@@ -52,7 +52,7 @@ Preset matching is exact on purpose. Hermes does not fuzzy-match preset names, s
 For each main model call when provider `moa` is selected, Hermes:
 
 1. resolves the selected preset by name;
-2. runs the configured reference models without tool schemas;
+2. runs the configured reference models without tool schemas (they receive only the conversation's user/assistant text — not the Hermes system prompt or tool-call transcript — so reference calls stay cheap and avoid strict-provider rejections);
 3. appends the reference outputs as private context for the aggregator;
 4. calls the configured aggregator with the normal Hermes tool schema;
 5. treats the aggregator response as the real model response;
@@ -109,6 +109,7 @@ hermes moa delete review
 ## Notes
 
 - MoA is no longer listed under `hermes tools`; there is no `moa` toolset to enable.
+- Setting `enabled: false` on a preset disables the reference fan-out for that preset: the aggregator acts alone, exactly as if you selected it as a plain model. This is the per-preset off switch surfaced in the dashboard and desktop settings.
 - A preset's aggregator cannot be another MoA preset. Recursive MoA trees are intentionally blocked.
 - Credential failures on one reference model do not abort the turn. Hermes includes the failure in the reference context and continues with whatever models returned.
 - MoA increases model-call count. A single model iteration can involve multiple reference calls plus the aggregator call.
