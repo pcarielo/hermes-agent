@@ -33,7 +33,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -455,6 +455,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     cache_read_tokens INTEGER DEFAULT 0,
     cache_write_tokens INTEGER DEFAULT 0,
     reasoning_tokens INTEGER DEFAULT 0,
+    context_window_tokens INTEGER,
+    context_used_tokens INTEGER,
+    context_threshold_tokens INTEGER,
+    context_usage_ratio REAL,
+    context_usage_source TEXT,
+    context_updated_at REAL,
     cwd TEXT,
     billing_provider TEXT,
     billing_base_url TEXT,
@@ -1241,6 +1247,63 @@ class SessionDB:
 
         def _do(conn):
             conn.execute("UPDATE sessions SET cwd = ? WHERE id = ?", (cwd, session_id))
+
+        self._execute_write(_do)
+
+    def update_context_metrics(
+        self,
+        session_id: str,
+        *,
+        context_window_tokens: Optional[int] = None,
+        context_used_tokens: Optional[int] = None,
+        context_threshold_tokens: Optional[int] = None,
+        source: str = "provider_usage",
+    ) -> None:
+        """Persist aggregate context-window telemetry for a session.
+
+        This intentionally stores only numeric, content-free metadata derived
+        after an LLM response (or from the context engine's aggregate status).
+        It never stores prompts, messages, tool payloads, or system prompt
+        fragments, so read-only dashboards can observe context pressure without
+        mutating the conversation or exposing sensitive transcript content.
+        """
+        if not session_id:
+            return
+
+        def _nonnegative_int(value: Optional[int]) -> Optional[int]:
+            try:
+                parsed = int(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+            return parsed if parsed is not None and parsed >= 0 else None
+
+        window = _nonnegative_int(context_window_tokens)
+        used = _nonnegative_int(context_used_tokens)
+        threshold = _nonnegative_int(context_threshold_tokens)
+        if window is None and used is None and threshold is None:
+            return
+
+        ratio = None
+        if window and used is not None:
+            ratio = min(1.0, max(0.0, used / window))
+
+        source_label = str(source or "provider_usage")[:64]
+        updated_at = time.time()
+
+        def _do(conn):
+            conn.execute(
+                """
+                UPDATE sessions SET
+                    context_window_tokens = COALESCE(?, context_window_tokens),
+                    context_used_tokens = COALESCE(?, context_used_tokens),
+                    context_threshold_tokens = COALESCE(?, context_threshold_tokens),
+                    context_usage_ratio = COALESCE(?, context_usage_ratio),
+                    context_usage_source = ?,
+                    context_updated_at = ?
+                WHERE id = ?
+                """,
+                (window, used, threshold, ratio, source_label, updated_at, session_id),
+            )
 
         self._execute_write(_do)
     # ──────────────────────────────────────────────────────────────────────

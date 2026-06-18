@@ -2758,6 +2758,46 @@ def test_default_spawn_auto_loads_kanban_worker_skill(kanban_home, monkeypatch):
     assert env.get("HERMES_PROFILE") == "some-profile"
 
 
+def test_default_spawn_omits_unavailable_kanban_worker_skill(kanban_home, monkeypatch):
+    """Missing bundled skill must not crash dispatched workers.
+
+    Some profile-scoped HERMES_HOME directories do not have the bundled
+    devops/kanban-worker skill installed. Passing ``--skills kanban-worker``
+    in that case makes CLI startup fail with ``Unknown skill(s):
+    kanban-worker`` before the worker can even block or heartbeat. The
+    dispatcher should omit the optional preload when it is not resolvable;
+    the mandatory worker lifecycle still comes from KANBAN_GUIDANCE.
+    """
+    monkeypatch.setattr(kb, "_kanban_worker_skill_available", lambda _h: False)
+    captured = {}
+
+    class FakeProc:
+        pid = 100001
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env", {})
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="missing worker skill", assignee="lean-profile")
+        task = kb.get_task(conn, tid)
+        workspace = kb.resolve_workspace(task)
+        pid = kb._default_spawn(task, str(workspace))
+        assert pid == 100001
+    finally:
+        conn.close()
+
+    cmd = captured["cmd"]
+    assert "--skills" not in cmd, f"spawn argv should not preload missing skills: {cmd}"
+    assert "chat" in cmd
+    assert "-q" in cmd
+    assert captured["env"].get("HERMES_KANBAN_TASK") == tid
+
+
 def test_default_spawn_raises_terminal_timeout_to_task_runtime(kanban_home, monkeypatch):
     """A task runtime cap should raise the worker's terminal default.
 

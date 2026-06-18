@@ -1668,6 +1668,31 @@ def run_conversation(
                                 model=agent.model,
                                 api_call_count=1,
                             )
+                            # Persist content-free context pressure telemetry
+                            # for read-only observers (dashboard/EOW/insights).
+                            # This runs after the provider response and writes
+                            # only aggregate numbers from the context engine;
+                            # it never mutates messages, tools, or the cached
+                            # system prompt, preserving prompt-cache stability.
+                            agent._session_db.update_context_metrics(
+                                agent.session_id,
+                                context_window_tokens=getattr(
+                                    agent.context_compressor,
+                                    "context_length",
+                                    None,
+                                ),
+                                context_used_tokens=getattr(
+                                    agent.context_compressor,
+                                    "last_prompt_tokens",
+                                    None,
+                                ),
+                                context_threshold_tokens=getattr(
+                                    agent.context_compressor,
+                                    "threshold_tokens",
+                                    None,
+                                ),
+                                source="provider_usage" if prompt_tokens else "context_engine",
+                            )
                         except Exception as e:
                             # Log token persistence failures so they're
                             # visible in agent.log — silent loss here is

@@ -137,6 +137,56 @@ class TestSessionLifecycle:
         assert session["input_tokens"] == 300
         assert session["output_tokens"] == 150
 
+    def test_update_context_metrics_stores_only_aggregates(self, db):
+        db.create_session(
+            session_id="s1",
+            source="cli",
+            system_prompt="SECRET SYSTEM PROMPT",
+        )
+        db.append_message("s1", role="user", content="private message")
+
+        db.update_context_metrics(
+            "s1",
+            context_window_tokens=1000,
+            context_used_tokens=250,
+            context_threshold_tokens=750,
+            source="provider_usage",
+        )
+
+        session = db.get_session("s1")
+        assert session["context_window_tokens"] == 1000
+        assert session["context_used_tokens"] == 250
+        assert session["context_threshold_tokens"] == 750
+        assert session["context_usage_ratio"] == 0.25
+        assert session["context_usage_source"] == "provider_usage"
+        assert session["context_updated_at"] is not None
+        # Telemetry must not mutate prompt/message state or expose transcript
+        # content in the session row used by dashboards.
+        assert session["system_prompt"] == "SECRET SYSTEM PROMPT"
+        assert session["message_count"] == 1
+        assert "private message" not in {str(v) for v in session.values()}
+
+    def test_update_context_metrics_preserves_prompt_cache_shape(self, db):
+        db.create_session(
+            session_id="s1",
+            source="cli",
+            system_prompt="stable prompt",
+        )
+        before = db.get_session("s1")
+
+        db.update_context_metrics(
+            "s1",
+            context_window_tokens=4000,
+            context_used_tokens=1000,
+            context_threshold_tokens=3000,
+        )
+
+        after = db.get_session("s1")
+        assert after["system_prompt"] == before["system_prompt"]
+        assert after["model_config"] == before["model_config"]
+        assert after["message_count"] == before["message_count"]
+        assert after["tool_call_count"] == before["tool_call_count"]
+
     def test_update_token_counts_tracks_api_call_count(self, db):
         """api_call_count increments with each update_token_counts call."""
         db.create_session(session_id="s1", source="cli")
