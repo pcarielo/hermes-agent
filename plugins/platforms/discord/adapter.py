@@ -1017,12 +1017,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 # permitted by DISCORD_ALLOW_BOTS are not rejected for
                 # not being in DISCORD_ALLOWED_USERS (fixes #4466).
                 _role_authorized = False
+                _mentions_self = self._client.user is not None and self._client.user in message.mentions
+                _mentions_self_role = adapter_self._discord_message_mentions_self_role(message)
                 if getattr(message.author, "bot", False):
                     allow_bots = os.getenv("DISCORD_ALLOW_BOTS", "none").lower().strip()
                     if allow_bots == "none":
                         return
                     elif allow_bots == "mentions":
-                        if not self._client.user or self._client.user not in message.mentions:
+                        if not _mentions_self and not _mentions_self_role:
                             return
                     # "all" falls through; bot is permitted — skip the
                     # human-user allowlist below (bots aren't in it).
@@ -1052,10 +1054,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 # with bot-aware filtering that works correctly when multiple
                 # agents share a channel.
                 if not isinstance(message.channel, discord.DMChannel) and message.mentions:
-                    _self_mentioned = (
-                        self._client.user is not None
-                        and self._client.user in message.mentions
-                    )
+                    _self_mentioned = _mentions_self
                     _other_bots_mentioned = any(
                         m.bot and m != self._client.user
                         for m in message.mentions
@@ -4216,6 +4215,38 @@ class DiscordAdapter(BasePlatformAdapter):
             return {part.strip() for part in s.split(",") if part.strip()}
         return set()
 
+    def _discord_mention_role_ids(self) -> set:
+        """Return role IDs that should count as mentioning this Discord bot.
+
+        Some servers expose a bot-facing role (for example ``@Jarbas``) and
+        users naturally ping that role instead of the bot user. Discord stores
+        those pings in ``message.role_mentions`` rather than ``message.mentions``,
+        so the normal direct-bot mention gate would otherwise ignore the
+        message. This opt-in list keeps mention-required channels quiet while
+        allowing a server-specific role mention to behave like a direct mention.
+        """
+        raw = self.config.extra.get("mention_role_ids")
+        if raw is None:
+            raw = os.getenv("DISCORD_MENTION_ROLE_IDS", "")
+        if isinstance(raw, list):
+            return {str(part).strip() for part in raw if str(part).strip()}
+        s = str(raw).strip() if raw is not None else ""
+        if s:
+            return {part.strip() for part in s.split(",") if part.strip()}
+        return set()
+
+    def _discord_message_mentions_self_role(self, message: Any) -> bool:
+        """Return True when *message* mentions a configured self role."""
+        role_ids = self._discord_mention_role_ids()
+        if not role_ids:
+            return False
+        for role in getattr(message, "role_mentions", None) or []:
+            if str(getattr(role, "id", "")) in role_ids:
+                return True
+        # Test fixtures and some gateway payloads may preserve only raw content.
+        content = getattr(message, "content", "") or ""
+        return any(f"<@&{role_id}>" in content for role_id in role_ids)
+
     def _discord_thread_require_mention(self) -> bool:
         """Return whether thread participation requires @mention to follow up.
 
@@ -5188,6 +5219,11 @@ class DiscordAdapter(BasePlatformAdapter):
             mention_prefix = True
             normalized_content = normalized_content.replace(f"<@{self._client.user.id}>", "").strip()
             normalized_content = normalized_content.replace(f"<@!{self._client.user.id}>", "").strip()
+            message.content = normalized_content
+        elif self._discord_message_mentions_self_role(message):
+            mention_prefix = True
+            for role_id in self._discord_mention_role_ids():
+                normalized_content = normalized_content.replace(f"<@&{role_id}>", "").strip()
             message.content = normalized_content
         if not isinstance(message.channel, discord.DMChannel):
             channel_ids = {str(message.channel.id)}
@@ -6968,9 +7004,10 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     ``DISCORD_REQUIRE_MENTION``, ``DISCORD_FREE_RESPONSE_CHANNELS``,
     ``DISCORD_AUTO_THREAD``, ``DISCORD_REACTIONS``,
     ``DISCORD_IGNORED_CHANNELS``, ``DISCORD_ALLOWED_CHANNELS``,
-    ``DISCORD_NO_THREAD_CHANNELS``, ``DISCORD_HISTORY_BACKFILL``,
-    ``DISCORD_HISTORY_BACKFILL_LIMIT``, ``DISCORD_ALLOW_MENTION_*``,
-    ``DISCORD_REPLY_TO_MODE``, ``DISCORD_THREAD_REQUIRE_MENTION``).
+    ``DISCORD_NO_THREAD_CHANNELS``, ``DISCORD_MENTION_ROLE_IDS``,
+    ``DISCORD_HISTORY_BACKFILL``, ``DISCORD_HISTORY_BACKFILL_LIMIT``,
+    ``DISCORD_ALLOW_MENTION_*``, ``DISCORD_REPLY_TO_MODE``,
+    ``DISCORD_THREAD_REQUIRE_MENTION``).
     Rather than rewrite ~50 call sites inside the adapter to read from
     ``PlatformConfig.extra`` instead, this hook keeps the existing
     env-driven model and merely owns the YAML→env translation here, next to
@@ -7028,6 +7065,12 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
         if isinstance(ntc, list):
             ntc = ",".join(str(v) for v in ntc)
         os.environ["DISCORD_NO_THREAD_CHANNELS"] = str(ntc)
+    # mention_role_ids: role IDs that count as mentioning this bot.
+    mri = discord_cfg.get("mention_role_ids")
+    if mri is not None and not os.getenv("DISCORD_MENTION_ROLE_IDS"):
+        if isinstance(mri, list):
+            mri = ",".join(str(v) for v in mri)
+        os.environ["DISCORD_MENTION_ROLE_IDS"] = str(mri)
     # history_backfill: recover missed channel messages for shared sessions
     # when require_mention is active.  Fetches messages between bot turns
     # and prepends them to the user message for context.

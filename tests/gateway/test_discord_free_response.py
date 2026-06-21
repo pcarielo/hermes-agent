@@ -116,6 +116,7 @@ def adapter(monkeypatch):
         "DISCORD_HISTORY_BACKFILL",
         "DISCORD_HISTORY_BACKFILL_LIMIT",
         "DISCORD_ALLOW_BOTS",
+        "DISCORD_MENTION_ROLE_IDS",
     ):
         monkeypatch.delenv(_var, raising=False)
 
@@ -127,12 +128,13 @@ def adapter(monkeypatch):
     return adapter
 
 
-def make_message(*, channel, content: str, mentions=None, msg_type=None):
+def make_message(*, channel, content: str, mentions=None, role_mentions=None, msg_type=None):
     author = SimpleNamespace(id=42, display_name="Jezza", name="Jezza")
     return SimpleNamespace(
         id=123,
         content=content,
         mentions=list(mentions or []),
+        role_mentions=list(role_mentions or []),
         attachments=[],
         reference=None,
         created_at=datetime.now(timezone.utc),
@@ -196,6 +198,27 @@ async def test_discord_defaults_to_require_mention(adapter, monkeypatch):
 
     # Should be ignored — no mention, require_mention defaults to true
     adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_discord_configured_role_mention_counts_as_bot_mention(adapter, monkeypatch):
+    """A configured role ping such as @Jarbas should satisfy mention gating."""
+    monkeypatch.delenv("DISCORD_REQUIRE_MENTION", raising=False)
+    monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)
+    monkeypatch.setenv("DISCORD_MENTION_ROLE_IDS", "777")
+
+    role = SimpleNamespace(id=777)
+    message = make_message(
+        channel=FakeTextChannel(channel_id=123),
+        content="<@&777> hello from role mention",
+        role_mentions=[role],
+    )
+
+    await adapter._handle_message(message)
+
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert event.text == "hello from role mention"
 
 
 @pytest.mark.asyncio
